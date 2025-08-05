@@ -1,4 +1,4 @@
-# app.py - Working ClipMaker with Parameter Selection
+# app.py - Enhanced ClipMaker with Real-time Generation and Vertical Format
 import os
 import json
 import tempfile
@@ -7,6 +7,7 @@ import re
 import time
 import streamlit as st
 from moviepy.video.io.VideoFileClip import VideoFileClip
+from moviepy.video.fx import resize, crop
 import gdown
 from openai import OpenAI
 
@@ -339,74 +340,249 @@ def time_to_seconds(time_str: str) -> float:
         return 0
 
 
-def generate_clips(video_path: str, segments: list) -> list:
-    """Use moviepy to cut video segments."""
-    clips = []
-    
+def seconds_to_time(seconds: float) -> str:
+    """Convert seconds to HH:MM:SS format."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def create_vertical_clip(video_path: str, start_time: float, end_time: float, crop_mode: str = "smart") -> str:
+    """Create a vertical 9:16 clip optimized for shorts/reels with intelligent cropping."""
     try:
         video = VideoFileClip(video_path)
-        total_duration = video.duration
-        st.info(f"Video duration: {total_duration:.1f} seconds")
         
-        for i, seg in enumerate(segments, start=1):
-            try:
-                start_time = time_to_seconds(seg.get("start", "0"))
-                end_time = time_to_seconds(seg.get("end", "0"))
-                caption = seg.get("caption", f"clip_{i}")
-                score = seg.get("score", 0)
-                reason = seg.get("reason", "")
-                
-                st.info(f"Processing clip {i}: {start_time:.1f}s - {end_time:.1f}s")
-                
-                if start_time >= end_time or start_time >= total_duration:
-                    continue
-                if end_time > total_duration:
-                    end_time = total_duration
-                if end_time - start_time < 1:
-                    continue
-                
-                try:
-                    if hasattr(video, 'subclipped'):
-                        clip = video.subclipped(start_time, end_time)
-                    elif hasattr(video, 'subclip'):
-                        clip = video.subclip(start_time, end_time)
-                    else:
-                        clip = video.cutout(0, start_time).cutout(end_time - start_time, video.duration)
-                except AttributeError:
-                    from moviepy.video.fx import subclip
-                    clip = subclip(video, start_time, end_time)
-                
-                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4", prefix=f"clip_{i}_")
-                st.info(f"Writing clip {i} to file...")
-                
-                try:
-                    clip.write_videofile(temp_file.name, codec="libx264", audio_codec="aac", 
-                                       temp_audiofile_path=tempfile.gettempdir(), preset='ultrafast', fps=24)
-                except Exception:
-                    clip.write_videofile(temp_file.name, preset='ultrafast')
-                
-                if os.path.isfile(temp_file.name) and os.path.getsize(temp_file.name) > 0:
-                    clips.append({
-                        "path": temp_file.name, "caption": caption, "score": score, "reason": reason,
-                        "hook": seg.get("hook", "Hook not specified"),
-                        "flow": seg.get("flow", "Flow not specified"), 
-                        "focus_parameters": seg.get("focus_parameters", ["General"]),
-                        "start": seg.get("start"), "end": seg.get("end"), 
-                        "duration": f"{end_time - start_time:.1f}s"
-                    })
-                    st.success(f"✅ Created clip {i}")
-                
-                clip.close()
-            except Exception as e:
-                st.error(f"Error creating clip {i}: {str(e)}")
-                continue
+        # Extract the clip
+        if hasattr(video, 'subclipped'):
+            clip = video.subclipped(start_time, end_time)
+        elif hasattr(video, 'subclip'):
+            clip = video.subclip(start_time, end_time)
+        else:
+            from moviepy.video.fx import subclip
+            clip = subclip(video, start_time, end_time)
         
+        # Get original dimensions
+        w, h = clip.size
+        aspect_ratio = w / h
+        target_aspect = 9 / 16  # 0.5625
+        
+        # Target dimensions for vertical video (9:16)
+        target_height = 1920
+        target_width = 1080
+        
+        if crop_mode == "smart":
+            # Smart cropping: Try to keep the most important part (usually center-top for talking heads)
+            if aspect_ratio > target_aspect:
+                # Video is wider than 9:16, need to crop width
+                new_width = int(h * target_aspect)
+                # Crop from center-left to capture more of the subject
+                x_center = w // 2
+                x_offset = max(0, min(w - new_width, x_center - new_width // 3))
+                cropped = crop(clip, x1=x_offset, x2=x_offset + new_width)
+            else:
+                # Video is taller than 9:16, need to crop height
+                new_height = int(w / target_aspect)
+                # Crop from top to keep faces/important content
+                y_offset = max(0, h // 4)  # Start from upper quarter
+                if y_offset + new_height > h:
+                    y_offset = h - new_height
+                cropped = crop(clip, y1=y_offset, y2=y_offset + new_height)
+        
+        elif crop_mode == "center":
+            # Center crop
+            if aspect_ratio > target_aspect:
+                new_width = int(h * target_aspect)
+                x_offset = (w - new_width) // 2
+                cropped = crop(clip, x1=x_offset, x2=x_offset + new_width)
+            else:
+                new_height = int(w / target_aspect)
+                y_offset = (h - new_height) // 2
+                cropped = crop(clip, y1=y_offset, y2=y_offset + new_height)
+        
+        elif crop_mode == "top":
+            # Top-centered crop (good for talking heads)
+            if aspect_ratio > target_aspect:
+                new_width = int(h * target_aspect)
+                x_offset = (w - new_width) // 2
+                cropped = crop(clip, x1=x_offset, x2=x_offset + new_width)
+            else:
+                new_height = int(w / target_aspect)
+                cropped = crop(clip, y1=0, y2=new_height)
+        
+        # Resize to target resolution
+        final_clip = resize(cropped, (target_width, target_height))
+        
+        # Create temporary file
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        
+        # Write video with optimized settings for vertical content
+        final_clip.write_videofile(
+            temp_file.name,
+            codec="libx264",
+            audio_codec="aac",
+            temp_audiofile_path=tempfile.gettempdir(),
+            preset='medium',
+            fps=30,
+            bitrate="2000k"
+        )
+        
+        # Clean up
+        final_clip.close()
+        cropped.close()
+        clip.close()
         video.close()
+        
+        return temp_file.name
+        
     except Exception as e:
-        st.error(f"Error processing video: {str(e)}")
+        st.error(f"Error creating vertical clip: {str(e)}")
         raise
-    
-    return clips
+
+
+def display_single_clip(clip_data: dict, platform: str, index: int):
+    """Display a single clip with edit functionality."""
+    with st.container():
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.subheader(f"Clip #{index} (Score: {clip_data.get('score', 0)}/100)")
+            
+            # Video player
+            video_path = clip_data.get("path")
+            if video_path and os.path.isfile(video_path):
+                try:
+                    st.video(video_path)
+                except Exception:
+                    st.error(f"Error displaying video for clip {index}")
+            else:
+                st.error(f"Video file not found for clip {index}")
+            
+            # Caption
+            st.markdown("**📝 Suggested Caption:**")
+            st.code(clip_data.get("caption", "No caption available"), language="text")
+            
+        with col2:
+            st.markdown("**📊 Details:**")
+            st.write(f"⏱️ **Duration:** {clip_data.get('duration', 'N/A')}")
+            st.write(f"🕐 **Time:** {clip_data.get('start', 'N/A')} - {clip_data.get('end', 'N/A')}")
+            st.write(f"🎯 **Score:** {clip_data.get('score', 0)}/100")
+            
+            # Hook
+            st.markdown("**🪝 0-Second Hook:**")
+            hook_text = clip_data.get('hook', 'Hook not specified')
+            st.write(f"*\"{hook_text}\"*")
+            
+            # Flow
+            st.markdown("**🎬 Content Flow:**")
+            flow_text = clip_data.get('flow', 'Flow structure not specified')
+            st.write(flow_text)
+            
+            # Focus Parameters
+            st.markdown("**🎯 Focus Parameters:**")
+            focus_params = clip_data.get('focus_parameters', ['General'])
+            if isinstance(focus_params, list):
+                for param in focus_params:
+                    st.write(f"• {param}")
+            else:
+                st.write(f"• {focus_params}")
+            
+            # Reason
+            st.markdown("**💡 Why this will work:**")
+            st.write(clip_data.get('reason', 'No reason provided'))
+            
+            # Timestamp editing section
+            st.markdown("**✏️ Edit Timestamps:**")
+            
+            # Current timestamps
+            current_start = clip_data.get('start', '00:00:00')
+            current_end = clip_data.get('end', '00:00:30')
+            
+            # Input fields for new timestamps
+            new_start = st.text_input(
+                "Start Time (HH:MM:SS)", 
+                value=current_start, 
+                key=f"start_{index}_{clip_data.get('score', 0)}"
+            )
+            new_end = st.text_input(
+                "End Time (HH:MM:SS)", 
+                value=current_end, 
+                key=f"end_{index}_{clip_data.get('score', 0)}"
+            )
+            
+            # Regenerate button
+            if st.button(f"🔄 Regenerate Clip", key=f"regen_{index}_{clip_data.get('score', 0)}"):
+                try:
+                    # Validate timestamps
+                    start_seconds = time_to_seconds(new_start)
+                    end_seconds = time_to_seconds(new_end)
+                    
+                    if start_seconds >= end_seconds:
+                        st.error("Start time must be before end time")
+                    elif end_seconds - start_seconds < 15:
+                        st.error("Clip must be at least 15 seconds long")
+                    elif end_seconds - start_seconds > 60:
+                        st.error("Clip must be 60 seconds or shorter")
+                    else:
+                        with st.spinner("Regenerating clip with new timestamps..."):
+                            # Get video path from session state
+                            video_path = st.session_state.get('video_path')
+                            if not video_path or not os.path.isfile(video_path):
+                                st.error("Original video not found")
+                            else:
+                                # Get crop mode from session state or default
+                                crop_mode = st.session_state.get('crop_mode', 'smart')
+                                
+                                # Generate new clip
+                                new_clip_path = create_vertical_clip(
+                                    video_path, 
+                                    start_seconds, 
+                                    end_seconds, 
+                                    crop_mode
+                                )
+                                
+                                # Update clip data
+                                clip_data['start'] = new_start
+                                clip_data['end'] = new_end
+                                clip_data['duration'] = f"{end_seconds - start_seconds:.1f}s"
+                                
+                                # Remove old file
+                                if clip_data.get('path') and os.path.isfile(clip_data['path']):
+                                    try:
+                                        os.unlink(clip_data['path'])
+                                    except:
+                                        pass
+                                
+                                clip_data['path'] = new_clip_path
+                                
+                                st.success("✅ Clip regenerated successfully!")
+                                st.rerun()
+                                
+                except Exception as e:
+                    st.error(f"Error regenerating clip: {str(e)}")
+            
+            # Download button
+            if video_path and os.path.isfile(video_path):
+                try:
+                    with open(video_path, "rb") as file:
+                        file_data = file.read()
+                        stable_key = f"dl_{st.session_state.session_id}_{index}_{abs(hash(video_path)) % 1000}"
+                        
+                        st.download_button(
+                            label="⬇️ Download Clip", 
+                            data=file_data,
+                            file_name=f"clip_{index}_{platform.replace(' ', '_').lower()}_vertical.mp4",
+                            mime="video/mp4", 
+                            use_container_width=True, 
+                            key=stable_key,
+                            help="Download this vertical clip to your device"
+                        )
+                except Exception as e:
+                    st.error(f"Error preparing download for clip {index}: {str(e)}")
+            else:
+                st.error("❌ File not available for download")
+        
+        st.markdown("---")
 
 
 def download_drive_file(drive_url: str, out_path: str) -> str:
@@ -444,102 +620,27 @@ def download_drive_file(drive_url: str, out_path: str) -> str:
         raise
 
 
-def display_clips(clips: list, platform: str, start_index: int = 0, max_clips: int = 5):
-    """Display clips with download buttons."""
-    clips_to_show = clips[start_index:start_index + max_clips]
-    
-    for i, clip in enumerate(clips_to_show, start=start_index + 1):
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.subheader(f"Clip #{i} (Score: {clip.get('score', 0)}/100)")
-            video_path = clip.get("path")
-            if video_path and os.path.isfile(video_path):
-                try:
-                    st.video(video_path)
-                except Exception:
-                    st.error(f"Error displaying video for clip {i}")
-            else:
-                st.error(f"Video file not found for clip {i}")
-            
-            st.markdown("**📝 Suggested Caption:**")
-            st.code(clip.get("caption", "No caption available"), language="text")
-            
-        with col2:
-            st.markdown("**📊 Details:**")
-            st.write(f"⏱️ **Duration:** {clip.get('duration', 'N/A')}")
-            st.write(f"🕐 **Time:** {clip.get('start', 'N/A')} - {clip.get('end', 'N/A')}")
-            st.write(f"🎯 **Score:** {clip.get('score', 0)}/100")
-            
-            # New detailed breakdown
-            st.markdown("**🪝 0-Second Hook:**")
-            hook_text = clip.get('hook', 'Hook not specified')
-            st.write(f"*\"{hook_text}\"*")
-            
-            st.markdown("**🎬 Content Flow:**")
-            flow_text = clip.get('flow', 'Flow structure not specified')
-            st.write(flow_text)
-            
-            st.markdown("**🎯 Focus Parameters:**")
-            focus_params = clip.get('focus_parameters', ['General'])
-            if isinstance(focus_params, list):
-                for param in focus_params:
-                    st.write(f"• {param}")
-            else:
-                st.write(f"• {focus_params}")
-            
-            st.markdown("**💡 Why this will work:**")
-            st.write(clip.get('reason', 'No reason provided'))
-            
-            # Download button with stable key that doesn't cause rerun
-            video_path = clip.get("path")
-            if video_path and os.path.isfile(video_path):
-                try:
-                    with open(video_path, "rb") as file:
-                        file_data = file.read()
-                        # Create a super stable key that includes session info
-                        stable_key = f"dl_{st.session_state.session_id}_{i}_{abs(hash(video_path)) % 1000}"
-                        
-                        # Add a small container to isolate the download button
-                        with st.container():
-                            st.download_button(
-                                label="⬇️ Download Clip", 
-                                data=file_data,
-                                file_name=f"clip_{i}_{platform.replace(' ', '_').lower()}.mp4",
-                                mime="video/mp4", 
-                                use_container_width=True, 
-                                key=stable_key,
-                                help="Download this clip to your device"
-                            )
-                except Exception as e:
-                    st.error(f"Error preparing download for clip {i}: {str(e)}")
-            else:
-                st.error("❌ File not available for download")
-        
-        st.markdown("---")
-
-
 # ----------
 # Streamlit App
 # ----------
 
 def main():
-    st.set_page_config(page_title="ClipMaker", layout="wide")
+    st.set_page_config(page_title="Enhanced ClipMaker", layout="wide")
     
-    st.title("🎬 Long‑form to Short‑form ClipMaker")
-    st.markdown("Transform your long-form content into viral short-form clips using AI-powered analysis!")
+    st.title("🎬 Enhanced Long‑form to Vertical Short‑form ClipMaker")
+    st.markdown("Transform your long-form content into viral vertical short-form clips with real-time generation and smart cropping!")
 
     # Initialize session state
     if 'clips_generated' not in st.session_state:
-        st.session_state.clips_generated = False
-    if 'all_clips' not in st.session_state:
-        st.session_state.all_clips = []
-    if 'clips_shown' not in st.session_state:
-        st.session_state.clips_shown = 0
-    if 'processing_complete' not in st.session_state:
-        st.session_state.processing_complete = False
+        st.session_state.clips_generated = []
+    if 'segments_to_process' not in st.session_state:
+        st.session_state.segments_to_process = []
+    if 'current_processing_index' not in st.session_state:
+        st.session_state.current_processing_index = 0
+    if 'processing_active' not in st.session_state:
+        st.session_state.processing_active = False
     if 'session_id' not in st.session_state:
-        st.session_state.session_id = hash(str(time.time())) % 100000  # Unique session identifier
+        st.session_state.session_id = hash(str(time.time())) % 100000
 
     # API Key validation
     API_KEY = get_api_key()
@@ -556,6 +657,15 @@ def main():
     # Sidebar settings
     st.sidebar.header("⚙️ Settings")
     platform = st.sidebar.selectbox("Target Platform", ["YouTube Shorts", "Instagram Reels", "TikTok"])
+    
+    # Vertical video settings
+    st.sidebar.subheader("📱 Vertical Video Settings")
+    crop_mode = st.sidebar.selectbox(
+        "Cropping Mode",
+        ["smart", "center", "top"],
+        help="Smart: AI-optimized cropping for content, Center: Traditional center crop, Top: Keep upper portion (good for talking heads)"
+    )
+    st.session_state['crop_mode'] = crop_mode
     
     # Content focus parameters
     st.sidebar.subheader("🎯 Content Focus")
@@ -596,10 +706,10 @@ def main():
                         st.session_state['video_size'] = size_mb
                         
                         # Reset processing state
-                        st.session_state.clips_generated = False
-                        st.session_state.all_clips = []
-                        st.session_state.clips_shown = 0
-                        st.session_state.processing_complete = False
+                        st.session_state.clips_generated = []
+                        st.session_state.segments_to_process = []
+                        st.session_state.current_processing_index = 0
+                        st.session_state.processing_active = False
                         
                         if size_mb <= 500:
                             st.video(video_path)
@@ -618,10 +728,10 @@ def main():
             st.session_state['video_size'] = len(uploaded.getvalue()) / (1024 * 1024)
             
             # Reset processing state
-            st.session_state.clips_generated = False
-            st.session_state.all_clips = []
-            st.session_state.clips_shown = 0
-            st.session_state.processing_complete = False
+            st.session_state.clips_generated = []
+            st.session_state.segments_to_process = []
+            st.session_state.current_processing_index = 0
+            st.session_state.processing_active = False
             st.video(video_path)
     
     # Use video from session state if available
@@ -644,80 +754,127 @@ def main():
         st.warning("⚠️ Please select at least one content focus parameter in the sidebar to continue.")
         return
 
-    # Show generated clips if they exist
-    if st.session_state.clips_generated and st.session_state.all_clips:
+    # Main content area
+    
+    # Show processing status if active
+    if st.session_state.processing_active:
         st.markdown("---")
-        st.header("🎬 Generated Clips")
+        st.header("🔄 Processing Clips")
+        
+        total_segments = len(st.session_state.segments_to_process)
+        current_index = st.session_state.current_processing_index
+        
+        if current_index < total_segments:
+            progress = current_index / total_segments
+            st.progress(progress, text=f"Processing clip {current_index + 1} of {total_segments}")
+            
+            # Process next clip
+            segment = st.session_state.segments_to_process[current_index]
+            
+            with st.spinner(f"Generating clip {current_index + 1}/{total_segments}..."):
+                try:
+                    start_time = time_to_seconds(segment["start"])
+                    end_time = time_to_seconds(segment["end"])
+                    
+                    # Create vertical clip
+                    clip_path = create_vertical_clip(video_path, start_time, end_time, crop_mode)
+                    
+                    # Create clip data
+                    clip_data = {
+                        "path": clip_path,
+                        "caption": segment.get("caption", f"clip_{current_index + 1}"),
+                        "score": segment.get("score", 0),
+                        "reason": segment.get("reason", ""),
+                        "hook": segment.get("hook", "Hook not specified"),
+                        "flow": segment.get("flow", "Flow not specified"),
+                        "focus_parameters": segment.get("focus_parameters", ["General"]),
+                        "start": segment.get("start"),
+                        "end": segment.get("end"),
+                        "duration": f"{end_time - start_time:.1f}s"
+                    }
+                    
+                    # Add to generated clips
+                    st.session_state.clips_generated.append(clip_data)
+                    st.session_state.current_processing_index += 1
+                    
+                    st.success(f"✅ Generated clip {current_index + 1}")
+                    
+                    # Continue processing
+                    if st.session_state.current_processing_index < total_segments:
+                        st.rerun()
+                    else:
+                        st.session_state.processing_active = False
+                        st.success("🎉 All clips generated!")
+                        st.rerun()
+                        
+                except Exception as e:
+                    st.error(f"Error generating clip {current_index + 1}: {str(e)}")
+                    st.session_state.current_processing_index += 1
+                    if st.session_state.current_processing_index < total_segments:
+                        st.rerun()
+                    else:
+                        st.session_state.processing_active = False
+        else:
+            st.session_state.processing_active = False
+            st.rerun()
+
+    # Show generated clips
+    if st.session_state.clips_generated:
+        st.markdown("---")
+        st.header("🎬 Generated Vertical Clips")
+        st.info(f"🎯 **Selected Parameters:** {', '.join(selected_parameters)} | **Crop Mode:** {crop_mode.title()}")
         
         # Check if clips still exist
-        valid_clips = [clip for clip in st.session_state.all_clips 
+        valid_clips = [clip for clip in st.session_state.clips_generated 
                       if clip.get("path") and os.path.isfile(clip["path"])]
         
         if not valid_clips:
             st.error("❌ All clip files are missing. Please regenerate clips.")
-            st.session_state.clips_generated = False
-            st.session_state.all_clips = []
-            st.session_state.clips_shown = 0
-            st.session_state.processing_complete = False
+            st.session_state.clips_generated = []
+            st.session_state.segments_to_process = []
+            st.session_state.current_processing_index = 0
+            st.session_state.processing_active = False
             return
         
-        if len(valid_clips) != len(st.session_state.all_clips):
-            st.session_state.all_clips = valid_clips
+        if len(valid_clips) != len(st.session_state.clips_generated):
+            st.session_state.clips_generated = valid_clips
             st.warning(f"Some clip files were missing. Showing {len(valid_clips)} available clips.")
         
-        # Display current batch of clips
-        clips_to_show = min(5, len(st.session_state.all_clips) - st.session_state.clips_shown)
-        
-        if clips_to_show > 0:
-            st.subheader(f"Top {st.session_state.clips_shown + 1}-{st.session_state.clips_shown + clips_to_show} Clips")
-            st.info(f"🎯 **Selected Parameters:** {', '.join(selected_parameters)}")
-            display_clips(st.session_state.all_clips, platform, st.session_state.clips_shown, clips_to_show)
-            st.session_state.clips_shown += clips_to_show
-        
-        # Show "Show More" button if there are more clips
-        remaining_clips = len(st.session_state.all_clips) - st.session_state.clips_shown
-        if remaining_clips > 0:
-            col1, col2, col3 = st.columns([1, 2, 1])
-            with col2:
-                # Use a unique key that doesn't conflict with download buttons
-                show_more_key = f"show_more_{st.session_state.clips_shown}_{len(st.session_state.all_clips)}"
-                if st.button(f"🎬 Show Next {min(5, remaining_clips)} Clips", 
-                           type="primary", use_container_width=True, key=show_more_key):
-                    st.rerun()
+        # Display all generated clips
+        for i, clip_data in enumerate(st.session_state.clips_generated, 1):
+            display_single_clip(clip_data, platform, i)
         
         # Summary stats
-        if st.session_state.clips_shown >= len(st.session_state.all_clips):
-            st.subheader("📈 Summary")
-            avg_score = sum(c.get('score', 0) for c in st.session_state.all_clips) / len(st.session_state.all_clips)
-            total_duration = sum(float(c.get('duration', '0').replace('s', '')) for c in st.session_state.all_clips)
-            
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Total Clips", len(st.session_state.all_clips))
-            col2.metric("Average Score", f"{avg_score:.1f}/100")
-            col3.metric("Total Duration", f"{total_duration:.1f}s")
-            col4.metric("Platform", platform)
+        st.subheader("📈 Summary")
+        avg_score = sum(c.get('score', 0) for c in st.session_state.clips_generated) / len(st.session_state.clips_generated)
+        total_duration = sum(float(c.get('duration', '0').replace('s', '')) for c in st.session_state.clips_generated)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Clips", len(st.session_state.clips_generated))
+        col2.metric("Average Score", f"{avg_score:.1f}/100")
+        col3.metric("Total Duration", f"{total_duration:.1f}s")
+        col4.metric("Format", "9:16 Vertical")
         
         # Reset button
-        reset_key = f"reset_{len(st.session_state.all_clips)}_{st.session_state.clips_shown}"
-        if st.button("🔄 Clear All Clips & Start Over", type="secondary", key=reset_key):
-            for clip in st.session_state.all_clips:
+        if st.button("🔄 Clear All Clips & Start Over", type="secondary"):
+            for clip in st.session_state.clips_generated:
                 try:
                     if clip.get("path") and os.path.isfile(clip["path"]):
                         os.unlink(clip["path"])
                 except:
                     pass
             
-            st.session_state.clips_generated = False
-            st.session_state.all_clips = []
-            st.session_state.clips_shown = 0
-            st.session_state.processing_complete = False
+            st.session_state.clips_generated = []
+            st.session_state.segments_to_process = []
+            st.session_state.current_processing_index = 0
+            st.session_state.processing_active = False
             st.rerun()
         
         return
 
-    # Main processing
-    if not st.session_state.processing_complete:
-        if st.button("🚀 Generate Clips", type="primary"):
+    # Initial processing button (only show if no clips are being processed or generated)
+    if not st.session_state.processing_active and not st.session_state.clips_generated:
+        if st.button("🚀 Generate Vertical Clips", type="primary"):
             if not video_path or not os.path.isfile(video_path):
                 st.error("Video file not found. Please reload your video.")
                 return
@@ -727,7 +884,7 @@ def main():
             
             # Step 1: Transcription
             status_text.text("🎤 Transcribing audio...")
-            progress_bar.progress(25)
+            progress_bar.progress(20)
             
             try:
                 transcript = transcribe_audio(video_path, client)
@@ -736,13 +893,13 @@ def main():
                 st.error(f"❌ Transcription failed: {str(e)}")
                 return
 
-            progress_bar.progress(50)
+            progress_bar.progress(40)
             with st.expander("📄 Transcript Preview", expanded=False):
                 st.text_area("Full Transcript", transcript, height=200, disabled=True)
 
             # Step 2: AI analysis
             status_text.text(f"🤖 Analyzing transcript for viral segments based on: {', '.join(selected_parameters)}...")
-            progress_bar.progress(75)
+            progress_bar.progress(60)
             
             # Get video duration for AI context
             try:
@@ -765,7 +922,7 @@ def main():
 
             # Step 3: Parse segments and sort by score
             status_text.text("📊 Processing segments...")
-            progress_bar.progress(90)
+            progress_bar.progress(80)
             
             segments = parse_segments(ai_json, video_duration)
             if not segments:
@@ -774,33 +931,19 @@ def main():
                 
             segments_sorted = sorted(segments, key=lambda x: x.get('score', 0), reverse=True)
             
-            # Step 4: Generate all clips
-            status_text.text("✂️ Generating all video clips...")
-            progress_bar.progress(95)
+            # Store segments for processing
+            st.session_state.segments_to_process = segments_sorted
+            st.session_state.current_processing_index = 0
+            st.session_state.processing_active = True
             
-            try:
-                all_clips = generate_clips(video_path, segments_sorted)
-                
-                if all_clips:
-                    st.session_state.all_clips = all_clips
-                    st.session_state.clips_generated = True
-                    st.session_state.clips_shown = 0
-                    st.session_state.processing_complete = True
-                    
-                    progress_bar.progress(100)
-                    status_text.text("✅ Clips generated successfully!")
-                    
-                    st.success(f"🎉 Generated {len(all_clips)} clips based on selected parameters: {', '.join(selected_parameters)}! Showing top 5 first.")
-                    st.rerun()
-                else:
-                    st.warning("No clips were generated.")
-                    return
-                    
-            except Exception as e:
-                st.error(f"❌ Clip generation failed: {str(e)}")
-                return
+            progress_bar.progress(100)
+            status_text.text("✅ Starting clip generation...")
+            
+            st.success(f"🎉 Found {len(segments_sorted)} segments! Starting real-time generation of vertical clips...")
+            time.sleep(1)  # Brief pause before starting
+            st.rerun()
     else:
-        st.info("🎯 Click 'Generate Clips' to start processing your video.")
+        st.info("🎯 Click 'Generate Vertical Clips' to start processing your video.")
 
 
 if __name__ == "__main__":
