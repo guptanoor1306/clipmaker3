@@ -1118,47 +1118,55 @@ def main():
                     st.info("⏳ Large file processing started. This may take 10-15 minutes...")
                     st.info("🔄 The app may appear unresponsive during processing - this is normal")
                 
-                # Step 1: Transcription
-                status_text.text("🎤 Starting transcription process...")
+                # Step 1: Smart Transcription (sample-based)
+                status_text.text("🎤 Extracting audio sample for analysis...")
                 progress_bar.progress(10)
                 
-                transcript = transcribe_audio(video_path, client)
-                st.success("✅ Transcription complete")
+                transcript, sample_start, sample_duration = transcribe_audio_sample(video_path, client)
+                st.success("✅ Transcription complete (from sample)")
                 
-                progress_bar.progress(50)
-                with st.expander("📄 Transcript Preview", expanded=False):
-                    st.text_area("Full Transcript", transcript, height=200, disabled=True)
+                progress_bar.progress(40)
+                with st.expander("📄 Transcript Preview (Sample)", expanded=False):
+                    st.text_area("Sample Transcript", transcript, height=200, disabled=True)
+                    st.info(f"📍 Sample taken from {sample_start/60:.1f} to {(sample_start + sample_duration)/60:.1f} minutes")
 
                 # Step 2: AI analysis
-                status_text.text(f"🤖 Analyzing transcript for viral segments based on: {', '.join(selected_parameters)}...")
-                progress_bar.progress(70)
+                status_text.text(f"🤖 Analyzing transcript sample for viral segments...")
+                progress_bar.progress(60)
                 
                 # Get video duration for AI context
                 try:
                     temp_video = VideoFileClip(video_path)
                     video_duration = temp_video.duration
                     temp_video.close()
-                    st.info(f"📏 Video duration: {video_duration/60:.1f} minutes")
+                    st.info(f"📏 Full video duration: {video_duration/60:.1f} minutes")
                 except Exception as e:
                     video_duration = None
                     st.warning(f"Could not determine video duration: {str(e)}")
                 
-                ai_json = analyze_transcript(transcript, platform, selected_parameters, client, video_duration)
+                # Analyze the sample transcript
+                ai_json = analyze_transcript(transcript, platform, selected_parameters, client, sample_duration)
                 st.success("✅ Analysis complete")
 
                 with st.expander("🔍 AI Analysis Output", expanded=False):
                     st.code(ai_json, language="json")
 
-                # Step 3: Parse segments and sort by score
-                status_text.text("📊 Processing segments...")
-                progress_bar.progress(85)
+                # Step 3: Parse segments and adjust timestamps
+                status_text.text("📊 Processing segments and adjusting timestamps...")
+                progress_bar.progress(80)
                 
-                segments = parse_segments(ai_json, video_duration)
+                segments = parse_segments(ai_json, sample_duration)
                 if not segments:
                     st.warning("⚠️ No valid segments found in AI response.")
                     return
+                
+                # Adjust timestamps to work with full video
+                if video_duration:
+                    segments_adjusted = adjust_timestamps_for_sample(segments, sample_start, sample_duration, video_duration)
+                else:
+                    segments_adjusted = segments
                     
-                segments_sorted = sorted(segments, key=lambda x: x.get('score', 0), reverse=True)
+                segments_sorted = sorted(segments_adjusted, key=lambda x: x.get('score', 0), reverse=True)
                 
                 # Store segments for processing
                 st.session_state.segments_to_process = segments_sorted
