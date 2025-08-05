@@ -835,8 +835,15 @@ def main():
                     start_time = time_to_seconds(segment["start"])
                     end_time = time_to_seconds(segment["end"])
                     
+                    # Get video path from session state with validation
+                    stored_video_path = st.session_state.get('video_path')
+                    if not stored_video_path or not os.path.isfile(stored_video_path):
+                        st.error("❌ Original video file not found. Cannot generate clips.")
+                        st.session_state.processing_active = False
+                        return
+                    
                     # Create vertical clip
-                    clip_path = create_vertical_clip(video_path, start_time, end_time, crop_mode)
+                    clip_path = create_vertical_clip(stored_video_path, start_time, end_time, crop_mode)
                     
                     # Create clip data
                     clip_data = {
@@ -974,7 +981,7 @@ def main():
                 
                 # Get video duration for AI context
                 try:
-                    temp_video = VideoFileClip(video_path)
+                    temp_video = VideoFileClip(current_video_path)
                     video_duration = temp_video.duration
                     temp_video.close()
                     st.info(f"📏 Full video duration: {video_duration/60:.1f} minutes")
@@ -1006,7 +1013,8 @@ def main():
                     
                 segments_sorted = sorted(segments_adjusted, key=lambda x: x.get('score', 0), reverse=True)
                 
-                # Store segments for processing
+                # Store segments for processing - save the validated video path
+                st.session_state['video_path'] = current_video_path  # Ensure we have the right path
                 st.session_state.segments_to_process = segments_sorted
                 st.session_state.current_processing_index = 0
                 st.session_state.processing_active = True
