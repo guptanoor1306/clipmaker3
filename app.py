@@ -7,17 +7,25 @@ import re
 import time
 import streamlit as st
 from moviepy.video.io.VideoFileClip import VideoFileClip
+import gdown
+from openai import OpenAI
+
+# MoviePy imports with version compatibility
 try:
+    # Try newer MoviePy structure
     from moviepy.video.fx.resize import resize
     from moviepy.video.fx.crop import crop
 except ImportError:
     try:
+        # Try importing as functions
         from moviepy.video.fx import resize, crop
     except ImportError:
-        # Fallback for older versions
-        from moviepy.video.fx.all import resize, crop
-import gdown
-from openai import OpenAI
+        # Define fallback functions using moviepy's apply method
+        def resize(clip, newsize):
+            return clip.resize(newsize)
+        
+        def crop(clip, x1=None, y1=None, x2=None, y2=None, width=None, height=None):
+            return clip.crop(x1=x1, y1=y1, x2=x2, y2=y2, width=width, height=height)
 
 # ----------
 # Helper Functions
@@ -387,7 +395,7 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
                 # Crop from center-left to capture more of the subject
                 x_center = w // 2
                 x_offset = max(0, min(w - new_width, x_center - new_width // 3))
-                cropped = crop(clip, x1=x_offset, x2=x_offset + new_width)
+                cropped = clip.crop(x1=x_offset, x2=x_offset + new_width)
             else:
                 # Video is taller than 9:16, need to crop height
                 new_height = int(w / target_aspect)
@@ -395,31 +403,31 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
                 y_offset = max(0, h // 4)  # Start from upper quarter
                 if y_offset + new_height > h:
                     y_offset = h - new_height
-                cropped = crop(clip, y1=y_offset, y2=y_offset + new_height)
+                cropped = clip.crop(y1=y_offset, y2=y_offset + new_height)
         
         elif crop_mode == "center":
             # Center crop
             if aspect_ratio > target_aspect:
                 new_width = int(h * target_aspect)
                 x_offset = (w - new_width) // 2
-                cropped = crop(clip, x1=x_offset, x2=x_offset + new_width)
+                cropped = clip.crop(x1=x_offset, x2=x_offset + new_width)
             else:
                 new_height = int(w / target_aspect)
                 y_offset = (h - new_height) // 2
-                cropped = crop(clip, y1=y_offset, y2=y_offset + new_height)
+                cropped = clip.crop(y1=y_offset, y2=y_offset + new_height)
         
         elif crop_mode == "top":
             # Top-centered crop (good for talking heads)
             if aspect_ratio > target_aspect:
                 new_width = int(h * target_aspect)
                 x_offset = (w - new_width) // 2
-                cropped = crop(clip, x1=x_offset, x2=x_offset + new_width)
+                cropped = clip.crop(x1=x_offset, x2=x_offset + new_width)
             else:
                 new_height = int(w / target_aspect)
-                cropped = crop(clip, y1=0, y2=new_height)
+                cropped = clip.crop(y1=0, y2=new_height)
         
-        # Resize to target resolution
-        final_clip = resize(cropped, (target_width, target_height))
+        # Resize to target resolution using built-in method
+        final_clip = cropped.resize((target_width, target_height))
         
         # Create temporary file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
