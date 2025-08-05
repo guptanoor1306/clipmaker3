@@ -135,25 +135,65 @@ def extract_audio_from_video(video_path: str) -> str:
         st.info(f"🎵 Extracting audio from {file_size_mb:.1f}MB video file...")
         
         if file_size_mb > 1000:  # > 1GB
-            st.warning("⚠️ Large file detected. Audio extraction may take several minutes...")
+            st.warning("⚠️ Large file detected. This may take 5-10 minutes...")
+            st.info("💡 The app may appear frozen during extraction - this is normal for large files")
         
         audio_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
         
-        # Use progress bar for large files
-        if file_size_mb > 500:
+        # For very large files, use more aggressive compression
+        if file_size_mb > 1500:  # > 1.5GB
+            st.info("🔧 Using aggressive compression for very large file...")
+            with st.spinner("🎵 Extracting and compressing audio (this will take several minutes)..."):
+                try:
+                    video = VideoFileClip(video_path)
+                    if video.audio is None:
+                        raise Exception("No audio track found in video")
+                    
+                    # Very aggressive compression for huge files
+                    audio = video.audio
+                    audio.write_audiofile(
+                        audio_temp.name, 
+                        codec='mp3', 
+                        bitrate='16k',  # Very low bitrate
+                        temp_audiofile_path=tempfile.gettempdir()
+                    )
+                    audio.close()
+                    video.close()
+                except Exception as e:
+                    # If that fails, try without temp_audiofile_path
+                    video = VideoFileClip(video_path)
+                    if video.audio is None:
+                        raise Exception("No audio track found in video")
+                    audio = video.audio
+                    audio.write_audiofile(audio_temp.name, codec='mp3', bitrate='16k')
+                    audio.close()
+                    video.close()
+                    
+        elif file_size_mb > 500:
             with st.spinner("🎵 Extracting audio (this may take a while for large files)..."):
-                video = VideoFileClip(video_path)
-                if video.audio is None:
-                    raise Exception("No audio track found in video")
-                audio = video.audio
-                # Use lower quality for faster processing of large files
-                audio.write_audiofile(
-                    audio_temp.name, 
-                    codec='mp3', 
-                    bitrate='32k'  # Lower bitrate for large files
-                )
-                audio.close()
-                video.close()
+                try:
+                    video = VideoFileClip(video_path)
+                    if video.audio is None:
+                        raise Exception("No audio track found in video")
+                    audio = video.audio
+                    # Use lower quality for faster processing of large files
+                    audio.write_audiofile(
+                        audio_temp.name, 
+                        codec='mp3', 
+                        bitrate='32k',
+                        temp_audiofile_path=tempfile.gettempdir()
+                    )
+                    audio.close()
+                    video.close()
+                except Exception as e:
+                    # Fallback without temp_audiofile_path
+                    video = VideoFileClip(video_path)
+                    if video.audio is None:
+                        raise Exception("No audio track found in video")
+                    audio = video.audio
+                    audio.write_audiofile(audio_temp.name, codec='mp3', bitrate='32k')
+                    audio.close()
+                    video.close()
         else:
             video = VideoFileClip(video_path)
             if video.audio is None:
@@ -175,6 +215,7 @@ def extract_audio_from_video(video_path: str) -> str:
     except Exception as e:
         st.error(f"Audio extraction failed: {str(e)}")
         st.info("💡 Try with a smaller video file or check if the video has an audio track")
+        st.info("🔧 For very large files, consider using a video editor to create a shorter clip first")
         raise
 
 
@@ -1015,12 +1056,22 @@ def main():
     # Initial processing button (only show if no clips are being processed or generated)
     if not st.session_state.processing_active and not st.session_state.clips_generated:
         
-        # Add option to process smaller chunks for large files
+        # Add warning and options for large files
         if 'video_path' in st.session_state:
             try:
                 video_size_mb = st.session_state.get('video_size', 0)
-                if video_size_mb > 1000:  # > 1GB
-                    st.warning("⚠️ Large video file detected (>1GB). Processing may take longer.")
+                if video_size_mb > 1500:  # > 1.5GB
+                    st.error("⚠️ Very large video file detected (>1.5GB)")
+                    st.warning("🚨 Files this large may cause the app to crash or timeout")
+                    st.info("💡 **Recommended:** Use a video editor to create a shorter clip (10-30 minutes) first")
+                    
+                    if st.checkbox("⚡ I understand the risks and want to proceed anyway"):
+                        proceed_anyway = True
+                    else:
+                        proceed_anyway = False
+                        st.stop()
+                elif video_size_mb > 1000:  # > 1GB
+                    st.warning("⚠️ Large video file detected (>1GB). Processing may take 10-15 minutes.")
                     
                     col1, col2 = st.columns(2)
                     with col1:
@@ -1029,17 +1080,17 @@ def main():
                             min_value=5, 
                             max_value=15, 
                             value=8,
-                            help="Smaller chunks = faster processing but more API calls"
+                            help="Smaller chunks = more stable processing"
                         )
                     with col2:
-                        low_quality = st.checkbox(
-                            "Use lower quality audio (faster processing)", 
+                        aggressive_compression = st.checkbox(
+                            "Use aggressive compression", 
                             value=True,
-                            help="Reduces audio quality but speeds up processing significantly"
+                            help="Reduces quality but prevents crashes"
                         )
                     
                     st.session_state['chunk_minutes'] = chunk_minutes
-                    st.session_state['low_quality'] = low_quality
+                    st.session_state['aggressive_compression'] = aggressive_compression
             except:
                 pass
         
@@ -1048,10 +1099,25 @@ def main():
                 st.error("Video file not found. Please reload your video.")
                 return
                 
+            # Check file size one more time before processing
+            try:
+                video_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+                if video_size_mb > 2000:  # > 2GB
+                    st.error("❌ File too large (>2GB). Please use a smaller file.")
+                    st.info("💡 Try creating a shorter clip or reducing video quality first")
+                    return
+            except:
+                pass
+                
             progress_bar = st.progress(0)
             status_text = st.empty()
             
             try:
+                # Add timeout warning for large files
+                if 'video_size' in st.session_state and st.session_state.get('video_size', 0) > 1000:
+                    st.info("⏳ Large file processing started. This may take 10-15 minutes...")
+                    st.info("🔄 The app may appear unresponsive during processing - this is normal")
+                
                 # Step 1: Transcription
                 status_text.text("🎤 Starting transcription process...")
                 progress_bar.progress(10)
@@ -1108,17 +1174,21 @@ def main():
                 
             except Exception as e:
                 st.error(f"❌ Processing failed: {str(e)}")
-                st.info("💡 Try with a smaller video file or check your internet connection")
+                st.info("💡 **Suggestions:**")
+                st.info("• Try with a smaller video file (under 1GB)")
+                st.info("• Create a shorter clip (10-30 minutes) using video editing software")
+                st.info("• Check your internet connection")
+                st.info("• Restart the app and try again")
                 
-                # Show debug info for large files
+                # Show specific advice for large files
                 if 'video_path' in st.session_state:
                     try:
                         video_size_mb = st.session_state.get('video_size', 0)
                         if video_size_mb > 1000:
-                            st.info("🔧 For large files, try:")
-                            st.info("• Using a shorter video segment")
-                            st.info("• Enabling lower quality audio processing")
-                            st.info("• Reducing audio chunk size")
+                            st.warning("🔧 **For large files like yours:**")
+                            st.info("• Use a video editor to extract just the best 20-30 minutes")
+                            st.info("• Reduce video resolution/quality before uploading")
+                            st.info("• Consider processing in smaller segments")
                     except:
                         pass
                 return
