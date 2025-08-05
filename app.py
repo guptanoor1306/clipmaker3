@@ -63,64 +63,65 @@ def seconds_to_time(seconds: float) -> str:
     secs = int(seconds % 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
-def extract_audio_sample(video_path: str, duration: float = 600) -> tuple:
-    """Extract just a sample of audio for transcription instead of the entire file."""
+def extract_audio_sample(video_path: str, duration: float = 300) -> tuple:
+    """Extract just a small sample of audio for transcription - using very conservative approach."""
     try:
+        # Start with smaller 5-minute sample for stability
         st.info(f"🎵 Extracting {duration/60:.1f} minute audio sample for analysis...")
         
         video = VideoFileClip(video_path)
         total_duration = video.duration
+        
+        # Use even smaller sample for large files
+        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        if file_size_mb > 1500:  # For very large files, use tiny sample
+            duration = min(duration, 180)  # Max 3 minutes for huge files
+            st.info(f"🔧 Using smaller {duration/60:.1f} minute sample for large file")
         
         # If video is shorter than sample duration, use entire video
         if total_duration <= duration:
             sample_duration = total_duration
             start_time = 0
         else:
-            # Take sample from the middle where content is usually more engaging
-            start_time = max(0, (total_duration - duration) / 2)
-            sample_duration = duration
+            # Take sample from 25% into the video (after intro, before conclusion)
+            start_time = max(0, total_duration * 0.25)
+            sample_duration = min(duration, total_duration - start_time)
         
         st.info(f"📍 Sampling from {start_time/60:.1f} to {(start_time + sample_duration)/60:.1f} minutes")
         
-        # Extract just the sample clip - try different methods for compatibility
+        # Extract just the sample clip - use most conservative method
         try:
-            # Method 1: Try subclip
+            # Try the most memory-efficient method first
             sample_clip = video.subclip(start_time, start_time + sample_duration)
         except AttributeError:
             try:
-                # Method 2: Try subclipped
                 sample_clip = video.subclipped(start_time, start_time + sample_duration)
             except AttributeError:
-                # Method 3: Try cutout method
-                try:
-                    if start_time > 0:
-                        sample_clip = video.cutout(0, start_time)
-                        if start_time + sample_duration < total_duration:
-                            sample_clip = sample_clip.cutout(sample_duration, sample_clip.duration)
-                    else:
-                        sample_clip = video.cutout(sample_duration, total_duration)
-                except AttributeError:
-                    # Method 4: Manual frame extraction fallback
-                    def get_sample_frame(get_frame, t):
-                        actual_t = start_time + t
-                        if actual_t >= start_time + sample_duration:
-                            actual_t = start_time + sample_duration - 0.1
-                        return get_frame(actual_t)
-                    
-                    sample_clip = video.fl(get_sample_frame, apply_to=['mask', 'audio'])
-                    sample_clip = sample_clip.set_duration(sample_duration)
+                # Ultra-conservative fallback - create new clip with manual duration
+                def get_sample_frame(get_frame, t):
+                    actual_t = start_time + (t % sample_duration)
+                    return get_frame(actual_t)
+                
+                sample_clip = video.fl(get_sample_frame, apply_to=['mask', 'audio'])
+                sample_clip = sample_clip.set_duration(sample_duration)
         
         if sample_clip.audio is None:
+            video.close()
             raise Exception("No audio track found in video")
         
-        # Extract audio from sample
+        # Extract audio from sample with aggressive compression
         audio_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        
+        # Use very low quality for memory efficiency
         sample_clip.audio.write_audiofile(
             audio_temp.name, 
             codec='mp3', 
-            bitrate='64k'
+            bitrate='32k',  # Lower bitrate
+            temp_audiofile_path=tempfile.gettempdir()
         )
         
+        # Immediately close everything to free memory
+        sample_clip.audio.close()
         sample_clip.close()
         video.close()
         
@@ -134,6 +135,11 @@ def extract_audio_sample(video_path: str, duration: float = 600) -> tuple:
         return audio_temp.name, start_time, sample_duration
         
     except Exception as e:
+        # Clean up on error
+        try:
+            video.close()
+        except:
+            pass
         st.error(f"Audio sample extraction failed: {str(e)}")
         raise
 
@@ -929,7 +935,7 @@ def main():
                 progress_bar.progress(10)
                 
                 # Extract audio sample and transcribe
-                audio_path, sample_start, sample_duration = extract_audio_sample(video_path, duration=600)  # 10 minute sample
+                audio_path, sample_start, sample_duration = extract_audio_sample(video_path, duration=300)  # 5 minute sample
                 
                 st.info("🎤 Transcribing audio sample...")
                 with open(audio_path, "rb") as f:
