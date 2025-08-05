@@ -797,14 +797,16 @@ def main():
     
     # Use video from session state if available
     if not video_path and 'video_path' in st.session_state:
-        video_path = st.session_state['video_path']
-        if os.path.isfile(video_path):
+        stored_path = st.session_state.get('video_path')
+        if stored_path and os.path.isfile(stored_path):
+            video_path = stored_path
             st.info(f"Using previously loaded video ({st.session_state.get('video_size', 0):.2f} MB)")
             if st.session_state.get('video_size', 0) <= 500:
                 st.video(video_path)
         else:
             st.warning("Previously loaded video no longer available. Please reload.")
-            del st.session_state['video_path']
+            if 'video_path' in st.session_state:
+                del st.session_state['video_path']
             video_path = None
 
     if not video_path:
