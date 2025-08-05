@@ -40,15 +40,35 @@ def get_api_key() -> str:
             return st.secrets[key]
     return os.getenv("OPENAI_API_KEY", "")
 
+def time_to_seconds(time_str: str) -> float:
+    """Convert HH:MM:SS to seconds."""
+    try:
+        parts = time_str.split(':')
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        elif len(parts) == 2:
+            m, s = parts
+            return int(m) * 60 + float(s)
+        else:
+            return float(parts[0])
+    except:
+        st.error(f"Could not parse time: {time_str}")
+        return 0
 
-def extract_audio_sample(video_path: str, start_time: float = 0, duration: float = 300) -> tuple:
+def seconds_to_time(seconds: float) -> str:
+    """Convert seconds to HH:MM:SS format."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+def extract_audio_sample(video_path: str, duration: float = 600) -> tuple:
     """Extract just a sample of audio for transcription instead of the entire file."""
     try:
         st.info(f"🎵 Extracting {duration/60:.1f} minute audio sample for analysis...")
         
         video = VideoFileClip(video_path)
-        
-        # Get total duration
         total_duration = video.duration
         
         # If video is shorter than sample duration, use entire video
@@ -91,40 +111,6 @@ def extract_audio_sample(video_path: str, start_time: float = 0, duration: float
     except Exception as e:
         st.error(f"Audio sample extraction failed: {str(e)}")
         raise
-
-
-def adjust_timestamps_for_sample(segments: list, sample_start: float, sample_duration: float, video_duration: float) -> list:
-    """Adjust AI-generated timestamps to work with the full video."""
-    adjusted_segments = []
-    
-    for segment in segments:
-        try:
-            # Get timestamps relative to sample
-            sample_start_time = time_to_seconds(segment["start"])
-            sample_end_time = time_to_seconds(segment["end"])
-            
-            # Convert to absolute timestamps in full video
-            absolute_start = sample_start + sample_start_time
-            absolute_end = sample_start + sample_end_time
-            
-            # Ensure timestamps are within video bounds
-            if absolute_start >= video_duration:
-                continue
-            if absolute_end > video_duration:
-                absolute_end = video_duration
-            
-            # Update the segment with absolute timestamps
-            segment["start"] = seconds_to_time(absolute_start)
-            segment["end"] = seconds_to_time(absolute_end)
-            
-            adjusted_segments.append(segment)
-            
-        except Exception as e:
-            st.warning(f"Skipping segment due to timestamp error: {e}")
-            continue
-    
-    return adjusted_segments
-
 
 def get_system_prompt(platform: str, selected_parameters: list, video_duration: float = None) -> str:
     if video_duration:
@@ -211,204 +197,9 @@ Example format:
   }}
 ]"""
 
-
-def extract_audio_from_video(video_path: str) -> str:
-    """Extract audio from video and compress if needed."""
-    try:
-        # Check file size and warn user
-        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-        st.info(f"🎵 Extracting audio from {file_size_mb:.1f}MB video file...")
-        
-        if file_size_mb > 1000:  # > 1GB
-            st.warning("⚠️ Large file detected. This may take 5-10 minutes...")
-            st.info("💡 The app may appear frozen during extraction - this is normal for large files")
-        
-        audio_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        
-        # For very large files, use more aggressive compression
-        if file_size_mb > 1500:  # > 1.5GB
-            st.info("🔧 Using aggressive compression for very large file...")
-            with st.spinner("🎵 Extracting and compressing audio (this will take several minutes)..."):
-                try:
-                    video = VideoFileClip(video_path)
-                    if video.audio is None:
-                        raise Exception("No audio track found in video")
-                    
-                    # Very aggressive compression for huge files
-                    audio = video.audio
-                    audio.write_audiofile(
-                        audio_temp.name, 
-                        codec='mp3', 
-                        bitrate='16k',  # Very low bitrate
-                        temp_audiofile_path=tempfile.gettempdir()
-                    )
-                    audio.close()
-                    video.close()
-                except Exception as e:
-                    # If that fails, try without temp_audiofile_path
-                    video = VideoFileClip(video_path)
-                    if video.audio is None:
-                        raise Exception("No audio track found in video")
-                    audio = video.audio
-                    audio.write_audiofile(audio_temp.name, codec='mp3', bitrate='16k')
-                    audio.close()
-                    video.close()
-                    
-        elif file_size_mb > 500:
-            with st.spinner("🎵 Extracting audio (this may take a while for large files)..."):
-                try:
-                    video = VideoFileClip(video_path)
-                    if video.audio is None:
-                        raise Exception("No audio track found in video")
-                    audio = video.audio
-                    # Use lower quality for faster processing of large files
-                    audio.write_audiofile(
-                        audio_temp.name, 
-                        codec='mp3', 
-                        bitrate='32k',
-                        temp_audiofile_path=tempfile.gettempdir()
-                    )
-                    audio.close()
-                    video.close()
-                except Exception as e:
-                    # Fallback without temp_audiofile_path
-                    video = VideoFileClip(video_path)
-                    if video.audio is None:
-                        raise Exception("No audio track found in video")
-                    audio = video.audio
-                    audio.write_audiofile(audio_temp.name, codec='mp3', bitrate='32k')
-                    audio.close()
-                    video.close()
-        else:
-            video = VideoFileClip(video_path)
-            if video.audio is None:
-                raise Exception("No audio track found in video")
-            audio = video.audio
-            audio.write_audiofile(audio_temp.name, codec='mp3', bitrate='64k')
-            audio.close()
-            video.close()
-        
-        # Verify audio file was created
-        if not os.path.exists(audio_temp.name) or os.path.getsize(audio_temp.name) == 0:
-            raise Exception("Audio extraction failed - no output file created")
-        
-        audio_size_mb = os.path.getsize(audio_temp.name) / (1024 * 1024)
-        st.success(f"✅ Audio extracted successfully ({audio_size_mb:.1f}MB)")
-        
-        return audio_temp.name
-        
-    except Exception as e:
-        st.error(f"Audio extraction failed: {str(e)}")
-        st.info("💡 Try with a smaller video file or check if the video has an audio track")
-        st.info("🔧 For very large files, consider using a video editor to create a shorter clip first")
-        raise
-
-
-def split_audio_file(audio_path: str, chunk_duration_minutes: int = 10) -> list:
-    """Split audio file into smaller chunks if it's too large."""
-    try:
-        file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-        st.info(f"🔍 Audio file size: {file_size_mb:.1f}MB")
-        
-        # Lower threshold for chunking to handle large files better
-        if file_size_mb <= 15:  # Reduced from 20MB
-            st.info("✅ Audio file is small enough for direct processing")
-            return [audio_path]
-        
-        st.info(f"📁 Audio file is {file_size_mb:.1f}MB. Splitting into {chunk_duration_minutes}-minute chunks for better processing...")
-        
-        from moviepy.audio.io.AudioFileClip import AudioFileClip
-        
-        with st.spinner("🔄 Loading audio file..."):
-            audio_clip = AudioFileClip(audio_path)
-            duration = audio_clip.duration
-            st.info(f"📏 Audio duration: {duration/60:.1f} minutes")
-        
-        chunk_duration_seconds = chunk_duration_minutes * 60
-        chunks = []
-        start_time = 0
-        chunk_num = 1
-        
-        # Calculate number of chunks
-        total_chunks = max(1, int(duration // chunk_duration_seconds) + (1 if duration % chunk_duration_seconds > 0 else 0))
-        st.info(f"📋 Creating {total_chunks} audio chunks...")
-        
-        progress_bar = st.progress(0)
-        
-        while start_time < duration:
-            end_time = min(start_time + chunk_duration_seconds, duration)
-            
-            with st.spinner(f"🎵 Creating audio chunk {chunk_num}/{total_chunks}..."):
-                chunk_temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_chunk_{chunk_num}.mp3")
-                chunk_audio = audio_clip.subclipped(start_time, end_time)
-                chunk_audio.write_audiofile(
-                    chunk_temp.name, 
-                    codec='mp3', 
-                    bitrate='32k'  # Lower bitrate for chunks
-                )
-                chunks.append(chunk_temp.name)
-                chunk_audio.close()
-            
-            progress_bar.progress(chunk_num / total_chunks)
-            st.success(f"✅ Created chunk {chunk_num}/{total_chunks}")
-            
-            start_time = end_time
-            chunk_num += 1
-        
-        audio_clip.close()
-        st.success(f"🎉 Successfully split audio into {len(chunks)} chunks")
-        return chunks
-        
-    except Exception as e:
-        st.error(f"Audio splitting failed: {str(e)}")
-        st.info("💡 Try with a smaller video file or reduce chunk duration")
-        raise
-
-
-def transcribe_audio(path: str, client: OpenAI) -> str:
-    """Transcribe audio via Whisper-1, handling large files by chunking."""
-    try:
-        st.info("🎵 Extracting audio from video...")
-        audio_path = extract_audio_from_video(path)
-        file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-        st.info(f"Audio file size: {file_size_mb:.1f}MB")
-        audio_chunks = split_audio_file(audio_path)
-        full_transcript = ""
-        
-        if len(audio_chunks) > 1:
-            st.info(f"Transcribing {len(audio_chunks)} audio chunks...")
-            progress_bar = st.progress(0)
-            for i, chunk_path in enumerate(audio_chunks):
-                st.info(f"Transcribing chunk {i+1}/{len(audio_chunks)}...")
-                with open(chunk_path, "rb") as f:
-                    resp = client.audio.transcriptions.create(model="whisper-1", file=f, response_format="text")
-                chunk_transcript = resp.strip()
-                if chunk_transcript:
-                    full_transcript += chunk_transcript + " "
-                progress_bar.progress((i + 1) / len(audio_chunks))
-                try:
-                    os.unlink(chunk_path)
-                except:
-                    pass
-        else:
-            with open(audio_chunks[0], "rb") as f:
-                resp = client.audio.transcriptions.create(model="whisper-1", file=f, response_format="text")
-            full_transcript = resp
-        
-        try:
-            os.unlink(audio_path)
-        except:
-            pass
-        return full_transcript.strip()
-    except Exception as e:
-        st.error(f"Transcription error: {str(e)}")
-        raise
-
-
 def analyze_transcript(transcript: str, platform: str, selected_parameters: list, client: OpenAI, video_duration: float = None) -> str:
     """Get segment suggestions via ChatCompletion."""
     transcript_length = len(transcript.split())
-    words_per_section = transcript_length // 5
     
     transcript_context = ""
     if video_duration and transcript_length > 0:
@@ -440,7 +231,6 @@ Transcript:
     except Exception as e:
         st.error(f"Analysis error: {str(e)}")
         raise
-
 
 def parse_segments(text: str, video_duration: float = None) -> list:
     """Parse JSON text into a list of segments and validate timestamps."""
@@ -486,90 +276,56 @@ def parse_segments(text: str, video_duration: float = None) -> list:
                     valid_segments.append(seg)
                 except:
                     continue
-            else:
-                # Try to handle old format without new fields
-                if all(key in seg for key in ["start", "end", "reason", "score", "caption"]):
-                    # Add default values for missing fields
-                    seg["hook"] = seg.get("hook", "Hook not specified")
-                    seg["flow"] = seg.get("flow", "Flow structure not specified")
-                    seg["focus_parameters"] = seg.get("focus_parameters", ["General"])
-                    
-                    try:
-                        start_seconds = time_to_seconds(seg["start"])
-                        end_seconds = time_to_seconds(seg["end"])
-                        
-                        if video_duration:
-                            if start_seconds >= video_duration:
-                                continue
-                            if end_seconds > video_duration:
-                                end_minutes = int(video_duration // 60)
-                                end_secs = int(video_duration % 60)
-                                seg["end"] = f"{end_minutes//60:02d}:{end_minutes%60:02d}:{end_secs:02d}"
-                        
-                        if start_seconds >= end_seconds:
-                            continue
-                        if end_seconds - start_seconds < 15:
-                            continue
-                        if end_seconds - start_seconds > 60:
-                            new_end_seconds = start_seconds + 60
-                            if video_duration and new_end_seconds > video_duration:
-                                new_end_seconds = video_duration
-                            end_minutes = int(new_end_seconds // 60)
-                            end_secs = int(new_end_seconds % 60)
-                            seg["end"] = f"{end_minutes//60:02d}:{end_minutes%60:02d}:{end_secs:02d}"
-                        
-                        valid_segments.append(seg)
-                    except:
-                        continue
         
         return valid_segments
     except json.JSONDecodeError as e:
         st.error(f"JSON parse error: {e}")
         return []
 
-
-def time_to_seconds(time_str: str) -> float:
-    """Convert HH:MM:SS to seconds."""
-    try:
-        parts = time_str.split(':')
-        if len(parts) == 3:
-            h, m, s = parts
-            return int(h) * 3600 + int(m) * 60 + float(s)
-        elif len(parts) == 2:
-            m, s = parts
-            return int(m) * 60 + float(s)
-        else:
-            return float(parts[0])
-    except:
-        st.error(f"Could not parse time: {time_str}")
-        return 0
-
-
-def seconds_to_time(seconds: float) -> str:
-    """Convert seconds to HH:MM:SS format."""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
-
+def adjust_timestamps_for_sample(segments: list, sample_start: float, sample_duration: float, video_duration: float) -> list:
+    """Adjust AI-generated timestamps to work with the full video."""
+    adjusted_segments = []
+    
+    for segment in segments:
+        try:
+            # Get timestamps relative to sample
+            sample_start_time = time_to_seconds(segment["start"])
+            sample_end_time = time_to_seconds(segment["end"])
+            
+            # Convert to absolute timestamps in full video
+            absolute_start = sample_start + sample_start_time
+            absolute_end = sample_start + sample_end_time
+            
+            # Ensure timestamps are within video bounds
+            if absolute_start >= video_duration:
+                continue
+            if absolute_end > video_duration:
+                absolute_end = video_duration
+            
+            # Update the segment with absolute timestamps
+            segment["start"] = seconds_to_time(absolute_start)
+            segment["end"] = seconds_to_time(absolute_end)
+            
+            adjusted_segments.append(segment)
+            
+        except Exception as e:
+            st.warning(f"Skipping segment due to timestamp error: {e}")
+            continue
+    
+    return adjusted_segments
 
 def create_vertical_clip(video_path: str, start_time: float, end_time: float, crop_mode: str = "smart") -> str:
     """Create a vertical 9:16 clip optimized for shorts/reels with intelligent cropping."""
     try:
-        video = VideoFileClip(video_path)
+        st.info(f"🎬 Creating clip from {start_time/60:.1f} to {end_time/60:.1f} minutes...")
         
-        # Extract the clip
-        if hasattr(video, 'subclipped'):
-            clip = video.subclipped(start_time, end_time)
-        elif hasattr(video, 'subclip'):
-            clip = video.subclip(start_time, end_time)
-        else:
-            clip = video.subclip(start_time, end_time)
+        video = VideoFileClip(video_path)
+        clip = video.subclip(start_time, end_time)
         
         # Get original dimensions
         w, h = clip.size
         aspect_ratio = w / h
-        target_aspect = 9 / 16  # 0.5625
+        target_aspect = 9 / 16
         
         # Target dimensions for vertical video (9:16)
         target_height = 1920
@@ -577,25 +333,18 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
         
         # Calculate crop parameters
         if crop_mode == "smart":
-            # Smart cropping: Try to keep the most important part (usually center-top for talking heads)
             if aspect_ratio > target_aspect:
-                # Video is wider than 9:16, need to crop width
                 new_width = int(h * target_aspect)
-                # Crop from center-left to capture more of the subject
                 x_center = w // 2
                 x_offset = max(0, min(w - new_width, x_center - new_width // 3))
                 x1, y1, x2, y2 = x_offset, 0, x_offset + new_width, h
             else:
-                # Video is taller than 9:16, need to crop height
                 new_height = int(w / target_aspect)
-                # Crop from top to keep faces/important content
-                y_offset = max(0, h // 4)  # Start from upper quarter
+                y_offset = max(0, h // 4)
                 if y_offset + new_height > h:
                     y_offset = h - new_height
                 x1, y1, x2, y2 = 0, y_offset, w, y_offset + new_height
-        
         elif crop_mode == "center":
-            # Center crop
             if aspect_ratio > target_aspect:
                 new_width = int(h * target_aspect)
                 x_offset = (w - new_width) // 2
@@ -604,9 +353,7 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
                 new_height = int(w / target_aspect)
                 y_offset = (h - new_height) // 2
                 x1, y1, x2, y2 = 0, y_offset, w, y_offset + new_height
-        
         elif crop_mode == "top":
-            # Top-centered crop (good for talking heads)
             if aspect_ratio > target_aspect:
                 new_width = int(h * target_aspect)
                 x_offset = (w - new_width) // 2
@@ -615,54 +362,30 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
                 new_height = int(w / target_aspect)
                 x1, y1, x2, y2 = 0, 0, w, new_height
         
-        # Apply cropping using MoviePy's fx.all approach
-        try:
-            # Try the modern approach first
-            from moviepy.video.fx.crop import crop
-            cropped = crop(clip, x1=x1, y1=y1, x2=x2, y2=y2)
-        except ImportError:
-            try:
-                # Try alternative import
-                from moviepy import fx
-                cropped = clip.fx(fx.crop, x1=x1, y1=y1, x2=x2, y2=y2)
-            except:
-                # Fallback: manual cropping using array slicing
-                def manual_crop(get_frame, t):
-                    frame = get_frame(t)
-                    return frame[y1:y2, x1:x2]
-                
-                cropped = clip.fl(manual_crop)
+        # Apply cropping - simple method
+        def crop_frame(get_frame, t):
+            frame = get_frame(t)
+            return frame[y1:y2, x1:x2]
+        
+        cropped = clip.fl(crop_frame)
         
         # Resize to target resolution
-        try:
-            # Try the modern resize approach
-            from moviepy.video.fx.resize import resize
-            final_clip = resize(cropped, (target_width, target_height))
-        except ImportError:
-            try:
-                # Try alternative resize
-                from moviepy import fx
-                final_clip = cropped.fx(fx.resize, (target_width, target_height))
-            except:
-                # Fallback: use the clip's resize method if available
-                if hasattr(cropped, 'resize'):
-                    final_clip = cropped.resize((target_width, target_height))
-                else:
-                    # Last resort: just use the cropped clip
-                    final_clip = cropped
+        if hasattr(cropped, 'resize'):
+            final_clip = cropped.resize((target_width, target_height))
+        else:
+            final_clip = cropped
         
         # Create temporary file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         
-        # Write video with optimized settings for vertical content
+        # Write video with optimized settings
         final_clip.write_videofile(
             temp_file.name,
             codec="libx264",
             audio_codec="aac",
-            temp_audiofile_path=tempfile.gettempdir(),
-            preset='medium',
+            preset='fast',
             fps=30,
-            bitrate="2000k"
+            bitrate="1500k"
         )
         
         # Clean up
@@ -671,40 +394,31 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
         clip.close()
         video.close()
         
+        st.success(f"✅ Vertical clip created successfully!")
         return temp_file.name
         
     except Exception as e:
         st.error(f"Error creating vertical clip: {str(e)}")
-        # If vertical conversion fails, try creating a simple horizontal clip
+        # Fallback: create simple horizontal clip
         try:
-            st.warning("Vertical conversion failed, creating horizontal clip instead...")
+            st.warning("Creating horizontal clip as fallback...")
             video = VideoFileClip(video_path)
-            
-            if hasattr(video, 'subclipped'):
-                clip = video.subclipped(start_time, end_time)
-            elif hasattr(video, 'subclip'):
-                clip = video.subclip(start_time, end_time)
-            else:
-                clip = video.subclip(start_time, end_time)
+            clip = video.subclip(start_time, end_time)
             
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-            
             clip.write_videofile(
                 temp_file.name,
                 codec="libx264",
                 audio_codec="aac",
-                temp_audiofile_path=tempfile.gettempdir(),
                 preset='ultrafast'
             )
             
             clip.close()
             video.close()
-            
             return temp_file.name
         except Exception as fallback_error:
             st.error(f"Fallback clip creation also failed: {str(fallback_error)}")
             raise
-
 
 def display_single_clip(clip_data: dict, platform: str, index: int):
     """Display a single clip with edit functionality."""
@@ -850,11 +564,8 @@ def display_single_clip(clip_data: dict, platform: str, index: int):
         
         st.markdown("---")
 
-
 def download_drive_file(drive_url: str, out_path: str) -> str:
     """Download a Google Drive file given its share URL to out_path."""
-    import requests
-    
     try:
         file_id = None
         if "id=" in drive_url:
@@ -884,7 +595,6 @@ def download_drive_file(drive_url: str, out_path: str) -> str:
     except Exception as e:
         st.error(f"Download error: {str(e)}")
         raise
-
 
 # ----------
 # Streamlit App
@@ -967,7 +677,6 @@ def main():
                     if result and os.path.isfile(result):
                         size_mb = os.path.getsize(result) / (1024 * 1024)
                         st.success(f"✅ Downloaded {size_mb:.2f} MB from Drive")
-                        video_path = result
                         st.session_state['video_path'] = video_path
                         st.session_state['video_size'] = size_mb
                         
@@ -1020,8 +729,6 @@ def main():
         st.warning("⚠️ Please select at least one content focus parameter in the sidebar to continue.")
         return
 
-    # Main content area
-    
     # Show processing status if active
     if st.session_state.processing_active:
         st.markdown("---")
@@ -1138,71 +845,17 @@ def main():
         
         return
 
-    # Initial processing button (only show if no clips are being processed or generated)
+    # Initial processing button
     if not st.session_state.processing_active and not st.session_state.clips_generated:
-        
-        # Add warning and options for large files
-        if 'video_path' in st.session_state:
-            try:
-                video_size_mb = st.session_state.get('video_size', 0)
-                if video_size_mb > 1500:  # > 1.5GB
-                    st.error("⚠️ Very large video file detected (>1.5GB)")
-                    st.warning("🚨 Files this large may cause the app to crash or timeout")
-                    st.info("💡 **Recommended:** Use a video editor to create a shorter clip (10-30 minutes) first")
-                    
-                    if st.checkbox("⚡ I understand the risks and want to proceed anyway"):
-                        proceed_anyway = True
-                    else:
-                        proceed_anyway = False
-                        st.stop()
-                elif video_size_mb > 1000:  # > 1GB
-                    st.warning("⚠️ Large video file detected (>1GB). Processing may take 10-15 minutes.")
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        chunk_minutes = st.slider(
-                            "Audio chunk size (minutes)", 
-                            min_value=5, 
-                            max_value=15, 
-                            value=8,
-                            help="Smaller chunks = more stable processing"
-                        )
-                    with col2:
-                        aggressive_compression = st.checkbox(
-                            "Use aggressive compression", 
-                            value=True,
-                            help="Reduces quality but prevents crashes"
-                        )
-                    
-                    st.session_state['chunk_minutes'] = chunk_minutes
-                    st.session_state['aggressive_compression'] = aggressive_compression
-            except:
-                pass
-        
         if st.button("🚀 Generate Vertical Clips", type="primary"):
             if not video_path or not os.path.isfile(video_path):
                 st.error("Video file not found. Please reload your video.")
                 return
                 
-            # Check file size one more time before processing
-            try:
-                video_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-                if video_size_mb > 2000:  # > 2GB
-                    st.error("❌ File too large (>2GB). Please use a smaller file.")
-                    st.info("💡 Try creating a shorter clip or reducing video quality first")
-                    return
-            except:
-                pass
-                
             progress_bar = st.progress(0)
             status_text = st.empty()
             
             try:
-                # Add timeout warning for large files
-                if 'video_size' in st.session_state and st.session_state.get('video_size', 0) > 1000:
-                    st.info("⏳ Large file processing started. This may take 10-15 minutes...")
-                    st.info("🔄 The app may appear unresponsive during processing - this is normal")
-                
                 # Step 1: Smart Transcription (sample-based)
                 status_text.text("🎤 Extracting audio sample for analysis...")
                 progress_bar.progress(10)
@@ -1276,28 +929,12 @@ def main():
                 status_text.text("✅ Starting clip generation...")
                 
                 st.success(f"🎉 Found {len(segments_sorted)} segments! Starting real-time generation of vertical clips...")
-                time.sleep(1)  # Brief pause before starting
+                time.sleep(1)
                 st.rerun()
                 
             except Exception as e:
                 st.error(f"❌ Processing failed: {str(e)}")
-                st.info("💡 **Suggestions:**")
-                st.info("• Try with a smaller video file (under 1GB)")
-                st.info("• Create a shorter clip (10-30 minutes) using video editing software")
-                st.info("• Check your internet connection")
-                st.info("• Restart the app and try again")
-                
-                # Show specific advice for large files
-                if 'video_path' in st.session_state:
-                    try:
-                        video_size_mb = st.session_state.get('video_size', 0)
-                        if video_size_mb > 1000:
-                            st.warning("🔧 **For large files like yours:**")
-                            st.info("• Use a video editor to extract just the best 20-30 minutes")
-                            st.info("• Reduce video resolution/quality before uploading")
-                            st.info("• Consider processing in smaller segments")
-                    except:
-                        pass
+                st.info("💡 Try with a smaller video file or check your internet connection")
                 return
     else:
         st.info("🎯 Click 'Generate Vertical Clips' to start processing your video.")
