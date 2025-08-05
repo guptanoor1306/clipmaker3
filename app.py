@@ -150,9 +150,7 @@ def extract_audio_from_video(video_path: str) -> str:
                 audio.write_audiofile(
                     audio_temp.name, 
                     codec='mp3', 
-                    bitrate='32k',  # Lower bitrate for large files
-                    verbose=False,
-                    logger=None
+                    bitrate='32k'  # Lower bitrate for large files
                 )
                 audio.close()
                 video.close()
@@ -161,7 +159,7 @@ def extract_audio_from_video(video_path: str) -> str:
             if video.audio is None:
                 raise Exception("No audio track found in video")
             audio = video.audio
-            audio.write_audiofile(audio_temp.name, codec='mp3', bitrate='64k', verbose=False, logger=None)
+            audio.write_audiofile(audio_temp.name, codec='mp3', bitrate='64k')
             audio.close()
             video.close()
         
@@ -220,9 +218,7 @@ def split_audio_file(audio_path: str, chunk_duration_minutes: int = 10) -> list:
                 chunk_audio.write_audiofile(
                     chunk_temp.name, 
                     codec='mp3', 
-                    bitrate='32k',  # Lower bitrate for chunks
-                    verbose=False,
-                    logger=None
+                    bitrate='32k'  # Lower bitrate for chunks
                 )
                 chunks.append(chunk_temp.name)
                 chunk_audio.close()
@@ -540,9 +536,7 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
             temp_audiofile_path=tempfile.gettempdir(),
             preset='medium',
             fps=30,
-            bitrate="2000k",
-            verbose=False,
-            logger=None
+            bitrate="2000k"
         )
         
         # Clean up
@@ -574,9 +568,7 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
                 codec="libx264",
                 audio_codec="aac",
                 temp_audiofile_path=tempfile.gettempdir(),
-                preset='ultrafast',
-                verbose=False,
-                logger=None
+                preset='ultrafast'
             )
             
             clip.close()
