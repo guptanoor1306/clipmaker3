@@ -375,8 +375,7 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
         elif hasattr(video, 'subclip'):
             clip = video.subclip(start_time, end_time)
         else:
-            from moviepy.video.fx import subclip
-            clip = subclip(video, start_time, end_time)
+            clip = video.subclip(start_time, end_time)
         
         # Get original dimensions
         w, h = clip.size
@@ -387,6 +386,7 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
         target_height = 1920
         target_width = 1080
         
+        # Calculate crop parameters
         if crop_mode == "smart":
             # Smart cropping: Try to keep the most important part (usually center-top for talking heads)
             if aspect_ratio > target_aspect:
@@ -395,7 +395,7 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
                 # Crop from center-left to capture more of the subject
                 x_center = w // 2
                 x_offset = max(0, min(w - new_width, x_center - new_width // 3))
-                cropped = clip.crop(x1=x_offset, x2=x_offset + new_width)
+                x1, y1, x2, y2 = x_offset, 0, x_offset + new_width, h
             else:
                 # Video is taller than 9:16, need to crop height
                 new_height = int(w / target_aspect)
@@ -403,31 +403,64 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
                 y_offset = max(0, h // 4)  # Start from upper quarter
                 if y_offset + new_height > h:
                     y_offset = h - new_height
-                cropped = clip.crop(y1=y_offset, y2=y_offset + new_height)
+                x1, y1, x2, y2 = 0, y_offset, w, y_offset + new_height
         
         elif crop_mode == "center":
             # Center crop
             if aspect_ratio > target_aspect:
                 new_width = int(h * target_aspect)
                 x_offset = (w - new_width) // 2
-                cropped = clip.crop(x1=x_offset, x2=x_offset + new_width)
+                x1, y1, x2, y2 = x_offset, 0, x_offset + new_width, h
             else:
                 new_height = int(w / target_aspect)
                 y_offset = (h - new_height) // 2
-                cropped = clip.crop(y1=y_offset, y2=y_offset + new_height)
+                x1, y1, x2, y2 = 0, y_offset, w, y_offset + new_height
         
         elif crop_mode == "top":
             # Top-centered crop (good for talking heads)
             if aspect_ratio > target_aspect:
                 new_width = int(h * target_aspect)
                 x_offset = (w - new_width) // 2
-                cropped = clip.crop(x1=x_offset, x2=x_offset + new_width)
+                x1, y1, x2, y2 = x_offset, 0, x_offset + new_width, h
             else:
                 new_height = int(w / target_aspect)
-                cropped = clip.crop(y1=0, y2=new_height)
+                x1, y1, x2, y2 = 0, 0, w, new_height
         
-        # Resize to target resolution using built-in method
-        final_clip = cropped.resize((target_width, target_height))
+        # Apply cropping using MoviePy's fx.all approach
+        try:
+            # Try the modern approach first
+            from moviepy.video.fx.crop import crop
+            cropped = crop(clip, x1=x1, y1=y1, x2=x2, y2=y2)
+        except ImportError:
+            try:
+                # Try alternative import
+                from moviepy import fx
+                cropped = clip.fx(fx.crop, x1=x1, y1=y1, x2=x2, y2=y2)
+            except:
+                # Fallback: manual cropping using array slicing
+                def manual_crop(get_frame, t):
+                    frame = get_frame(t)
+                    return frame[y1:y2, x1:x2]
+                
+                cropped = clip.fl(manual_crop)
+        
+        # Resize to target resolution
+        try:
+            # Try the modern resize approach
+            from moviepy.video.fx.resize import resize
+            final_clip = resize(cropped, (target_width, target_height))
+        except ImportError:
+            try:
+                # Try alternative resize
+                from moviepy import fx
+                final_clip = cropped.fx(fx.resize, (target_width, target_height))
+            except:
+                # Fallback: use the clip's resize method if available
+                if hasattr(cropped, 'resize'):
+                    final_clip = cropped.resize((target_width, target_height))
+                else:
+                    # Last resort: just use the cropped clip
+                    final_clip = cropped
         
         # Create temporary file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
@@ -440,7 +473,9 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
             temp_audiofile_path=tempfile.gettempdir(),
             preset='medium',
             fps=30,
-            bitrate="2000k"
+            bitrate="2000k",
+            verbose=False,
+            logger=None
         )
         
         # Clean up
@@ -453,7 +488,37 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
         
     except Exception as e:
         st.error(f"Error creating vertical clip: {str(e)}")
-        raise
+        # If vertical conversion fails, try creating a simple horizontal clip
+        try:
+            st.warning("Vertical conversion failed, creating horizontal clip instead...")
+            video = VideoFileClip(video_path)
+            
+            if hasattr(video, 'subclipped'):
+                clip = video.subclipped(start_time, end_time)
+            elif hasattr(video, 'subclip'):
+                clip = video.subclip(start_time, end_time)
+            else:
+                clip = video.subclip(start_time, end_time)
+            
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            
+            clip.write_videofile(
+                temp_file.name,
+                codec="libx264",
+                audio_codec="aac",
+                temp_audiofile_path=tempfile.gettempdir(),
+                preset='ultrafast',
+                verbose=False,
+                logger=None
+            )
+            
+            clip.close()
+            video.close()
+            
+            return temp_file.name
+        except Exception as fallback_error:
+            st.error(f"Fallback clip creation also failed: {str(fallback_error)}")
+            raise
 
 
 def display_single_clip(clip_data: dict, platform: str, index: int):
