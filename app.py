@@ -41,6 +41,91 @@ def get_api_key() -> str:
     return os.getenv("OPENAI_API_KEY", "")
 
 
+def extract_audio_sample(video_path: str, start_time: float = 0, duration: float = 300) -> tuple:
+    """Extract just a sample of audio for transcription instead of the entire file."""
+    try:
+        st.info(f"🎵 Extracting {duration/60:.1f} minute audio sample for analysis...")
+        
+        video = VideoFileClip(video_path)
+        
+        # Get total duration
+        total_duration = video.duration
+        
+        # If video is shorter than sample duration, use entire video
+        if total_duration <= duration:
+            sample_duration = total_duration
+            start_time = 0
+        else:
+            # Take sample from the middle where content is usually more engaging
+            start_time = max(0, (total_duration - duration) / 2)
+            sample_duration = duration
+        
+        st.info(f"📍 Sampling from {start_time/60:.1f} to {(start_time + sample_duration)/60:.1f} minutes")
+        
+        # Extract just the sample clip
+        sample_clip = video.subclip(start_time, start_time + sample_duration)
+        
+        if sample_clip.audio is None:
+            raise Exception("No audio track found in video")
+        
+        # Extract audio from sample
+        audio_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+        sample_clip.audio.write_audiofile(
+            audio_temp.name, 
+            codec='mp3', 
+            bitrate='64k'
+        )
+        
+        sample_clip.close()
+        video.close()
+        
+        # Verify audio file was created
+        if not os.path.exists(audio_temp.name) or os.path.getsize(audio_temp.name) == 0:
+            raise Exception("Audio extraction failed - no output file created")
+        
+        audio_size_mb = os.path.getsize(audio_temp.name) / (1024 * 1024)
+        st.success(f"✅ Audio sample extracted successfully ({audio_size_mb:.1f}MB)")
+        
+        return audio_temp.name, start_time, sample_duration
+        
+    except Exception as e:
+        st.error(f"Audio sample extraction failed: {str(e)}")
+        raise
+
+
+def adjust_timestamps_for_sample(segments: list, sample_start: float, sample_duration: float, video_duration: float) -> list:
+    """Adjust AI-generated timestamps to work with the full video."""
+    adjusted_segments = []
+    
+    for segment in segments:
+        try:
+            # Get timestamps relative to sample
+            sample_start_time = time_to_seconds(segment["start"])
+            sample_end_time = time_to_seconds(segment["end"])
+            
+            # Convert to absolute timestamps in full video
+            absolute_start = sample_start + sample_start_time
+            absolute_end = sample_start + sample_end_time
+            
+            # Ensure timestamps are within video bounds
+            if absolute_start >= video_duration:
+                continue
+            if absolute_end > video_duration:
+                absolute_end = video_duration
+            
+            # Update the segment with absolute timestamps
+            segment["start"] = seconds_to_time(absolute_start)
+            segment["end"] = seconds_to_time(absolute_end)
+            
+            adjusted_segments.append(segment)
+            
+        except Exception as e:
+            st.warning(f"Skipping segment due to timestamp error: {e}")
+            continue
+    
+    return adjusted_segments
+
+
 def get_system_prompt(platform: str, selected_parameters: list, video_duration: float = None) -> str:
     if video_duration:
         duration_minutes = int(video_duration // 60)
