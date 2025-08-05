@@ -7,7 +7,15 @@ import re
 import time
 import streamlit as st
 from moviepy.video.io.VideoFileClip import VideoFileClip
-from moviepy.video.fx import resize, crop
+try:
+    from moviepy.video.fx.resize import resize
+    from moviepy.video.fx.crop import crop
+except ImportError:
+    try:
+        from moviepy.video.fx import resize, crop
+    except ImportError:
+        # Fallback for older versions
+        from moviepy.video.fx.all import resize, crop
 import gdown
 from openai import OpenAI
 
