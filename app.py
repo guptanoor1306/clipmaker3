@@ -1122,7 +1122,21 @@ def main():
                 status_text.text("🎤 Extracting audio sample for analysis...")
                 progress_bar.progress(10)
                 
-                transcript, sample_start, sample_duration = transcribe_audio_sample(video_path, client)
+                # Extract audio sample and transcribe
+                audio_path, sample_start, sample_duration = extract_audio_sample(video_path, duration=600)  # 10 minute sample
+                
+                st.info("🎤 Transcribing audio sample...")
+                with open(audio_path, "rb") as f:
+                    resp = client.audio.transcriptions.create(model="whisper-1", file=f, response_format="text")
+                
+                transcript = resp.strip()
+                
+                # Clean up audio file
+                try:
+                    os.unlink(audio_path)
+                except:
+                    pass
+                
                 st.success("✅ Transcription complete (from sample)")
                 
                 progress_bar.progress(40)
