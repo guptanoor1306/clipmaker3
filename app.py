@@ -130,15 +130,53 @@ Example format:
 def extract_audio_from_video(video_path: str) -> str:
     """Extract audio from video and compress if needed."""
     try:
+        # Check file size and warn user
+        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+        st.info(f"🎵 Extracting audio from {file_size_mb:.1f}MB video file...")
+        
+        if file_size_mb > 1000:  # > 1GB
+            st.warning("⚠️ Large file detected. Audio extraction may take several minutes...")
+        
         audio_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-        video = VideoFileClip(video_path)
-        audio = video.audio
-        audio.write_audiofile(audio_temp.name, codec='mp3', bitrate='64k')
-        audio.close()
-        video.close()
+        
+        # Use progress bar for large files
+        if file_size_mb > 500:
+            with st.spinner("🎵 Extracting audio (this may take a while for large files)..."):
+                video = VideoFileClip(video_path)
+                if video.audio is None:
+                    raise Exception("No audio track found in video")
+                audio = video.audio
+                # Use lower quality for faster processing of large files
+                audio.write_audiofile(
+                    audio_temp.name, 
+                    codec='mp3', 
+                    bitrate='32k',  # Lower bitrate for large files
+                    verbose=False,
+                    logger=None
+                )
+                audio.close()
+                video.close()
+        else:
+            video = VideoFileClip(video_path)
+            if video.audio is None:
+                raise Exception("No audio track found in video")
+            audio = video.audio
+            audio.write_audiofile(audio_temp.name, codec='mp3', bitrate='64k', verbose=False, logger=None)
+            audio.close()
+            video.close()
+        
+        # Verify audio file was created
+        if not os.path.exists(audio_temp.name) or os.path.getsize(audio_temp.name) == 0:
+            raise Exception("Audio extraction failed - no output file created")
+        
+        audio_size_mb = os.path.getsize(audio_temp.name) / (1024 * 1024)
+        st.success(f"✅ Audio extracted successfully ({audio_size_mb:.1f}MB)")
+        
         return audio_temp.name
+        
     except Exception as e:
         st.error(f"Audio extraction failed: {str(e)}")
+        st.info("💡 Try with a smaller video file or check if the video has an audio track")
         raise
 
 
@@ -146,33 +184,62 @@ def split_audio_file(audio_path: str, chunk_duration_minutes: int = 10) -> list:
     """Split audio file into smaller chunks if it's too large."""
     try:
         file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-        if file_size_mb <= 20:
+        st.info(f"🔍 Audio file size: {file_size_mb:.1f}MB")
+        
+        # Lower threshold for chunking to handle large files better
+        if file_size_mb <= 15:  # Reduced from 20MB
+            st.info("✅ Audio file is small enough for direct processing")
             return [audio_path]
         
-        st.info(f"Audio file is {file_size_mb:.1f}MB. Splitting into chunks...")
+        st.info(f"📁 Audio file is {file_size_mb:.1f}MB. Splitting into {chunk_duration_minutes}-minute chunks for better processing...")
+        
         from moviepy.audio.io.AudioFileClip import AudioFileClip
-        audio_clip = AudioFileClip(audio_path)
-        duration = audio_clip.duration
+        
+        with st.spinner("🔄 Loading audio file..."):
+            audio_clip = AudioFileClip(audio_path)
+            duration = audio_clip.duration
+            st.info(f"📏 Audio duration: {duration/60:.1f} minutes")
+        
         chunk_duration_seconds = chunk_duration_minutes * 60
         chunks = []
         start_time = 0
         chunk_num = 1
         
+        # Calculate number of chunks
+        total_chunks = max(1, int(duration // chunk_duration_seconds) + (1 if duration % chunk_duration_seconds > 0 else 0))
+        st.info(f"📋 Creating {total_chunks} audio chunks...")
+        
+        progress_bar = st.progress(0)
+        
         while start_time < duration:
             end_time = min(start_time + chunk_duration_seconds, duration)
-            chunk_temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_chunk_{chunk_num}.mp3")
-            chunk_audio = audio_clip.subclipped(start_time, end_time)
-            chunk_audio.write_audiofile(chunk_temp.name, codec='mp3', bitrate='64k')
-            chunks.append(chunk_temp.name)
-            chunk_audio.close()
+            
+            with st.spinner(f"🎵 Creating audio chunk {chunk_num}/{total_chunks}..."):
+                chunk_temp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_chunk_{chunk_num}.mp3")
+                chunk_audio = audio_clip.subclipped(start_time, end_time)
+                chunk_audio.write_audiofile(
+                    chunk_temp.name, 
+                    codec='mp3', 
+                    bitrate='32k',  # Lower bitrate for chunks
+                    verbose=False,
+                    logger=None
+                )
+                chunks.append(chunk_temp.name)
+                chunk_audio.close()
+            
+            progress_bar.progress(chunk_num / total_chunks)
+            st.success(f"✅ Created chunk {chunk_num}/{total_chunks}")
+            
             start_time = end_time
             chunk_num += 1
         
         audio_clip.close()
-        st.success(f"Split audio into {len(chunks)} chunks")
+        st.success(f"🎉 Successfully split audio into {len(chunks)} chunks")
         return chunks
+        
     except Exception as e:
         st.error(f"Audio splitting failed: {str(e)}")
+        st.info("💡 Try with a smaller video file or reduce chunk duration")
         raise
 
 
@@ -955,6 +1022,35 @@ def main():
 
     # Initial processing button (only show if no clips are being processed or generated)
     if not st.session_state.processing_active and not st.session_state.clips_generated:
+        
+        # Add option to process smaller chunks for large files
+        if 'video_path' in st.session_state:
+            try:
+                video_size_mb = st.session_state.get('video_size', 0)
+                if video_size_mb > 1000:  # > 1GB
+                    st.warning("⚠️ Large video file detected (>1GB). Processing may take longer.")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        chunk_minutes = st.slider(
+                            "Audio chunk size (minutes)", 
+                            min_value=5, 
+                            max_value=15, 
+                            value=8,
+                            help="Smaller chunks = faster processing but more API calls"
+                        )
+                    with col2:
+                        low_quality = st.checkbox(
+                            "Use lower quality audio (faster processing)", 
+                            value=True,
+                            help="Reduces audio quality but speeds up processing significantly"
+                        )
+                    
+                    st.session_state['chunk_minutes'] = chunk_minutes
+                    st.session_state['low_quality'] = low_quality
+            except:
+                pass
+        
         if st.button("🚀 Generate Vertical Clips", type="primary"):
             if not video_path or not os.path.isfile(video_path):
                 st.error("Video file not found. Please reload your video.")
@@ -963,66 +1059,77 @@ def main():
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # Step 1: Transcription
-            status_text.text("🎤 Transcribing audio...")
-            progress_bar.progress(20)
-            
             try:
+                # Step 1: Transcription
+                status_text.text("🎤 Starting transcription process...")
+                progress_bar.progress(10)
+                
                 transcript = transcribe_audio(video_path, client)
                 st.success("✅ Transcription complete")
-            except Exception as e:
-                st.error(f"❌ Transcription failed: {str(e)}")
-                return
+                
+                progress_bar.progress(50)
+                with st.expander("📄 Transcript Preview", expanded=False):
+                    st.text_area("Full Transcript", transcript, height=200, disabled=True)
 
-            progress_bar.progress(40)
-            with st.expander("📄 Transcript Preview", expanded=False):
-                st.text_area("Full Transcript", transcript, height=200, disabled=True)
-
-            # Step 2: AI analysis
-            status_text.text(f"🤖 Analyzing transcript for viral segments based on: {', '.join(selected_parameters)}...")
-            progress_bar.progress(60)
-            
-            # Get video duration for AI context
-            try:
-                temp_video = VideoFileClip(video_path)
-                video_duration = temp_video.duration
-                temp_video.close()
-            except:
-                video_duration = None
-                st.warning("Could not determine video duration for AI analysis")
-            
-            try:
+                # Step 2: AI analysis
+                status_text.text(f"🤖 Analyzing transcript for viral segments based on: {', '.join(selected_parameters)}...")
+                progress_bar.progress(70)
+                
+                # Get video duration for AI context
+                try:
+                    temp_video = VideoFileClip(video_path)
+                    video_duration = temp_video.duration
+                    temp_video.close()
+                    st.info(f"📏 Video duration: {video_duration/60:.1f} minutes")
+                except Exception as e:
+                    video_duration = None
+                    st.warning(f"Could not determine video duration: {str(e)}")
+                
                 ai_json = analyze_transcript(transcript, platform, selected_parameters, client, video_duration)
                 st.success("✅ Analysis complete")
-            except Exception as e:
-                st.error(f"❌ Analysis failed: {str(e)}")
-                return
 
-            with st.expander("🔍 AI Analysis Output", expanded=False):
-                st.code(ai_json, language="json")
+                with st.expander("🔍 AI Analysis Output", expanded=False):
+                    st.code(ai_json, language="json")
 
-            # Step 3: Parse segments and sort by score
-            status_text.text("📊 Processing segments...")
-            progress_bar.progress(80)
-            
-            segments = parse_segments(ai_json, video_duration)
-            if not segments:
-                st.warning("⚠️ No valid segments found in AI response.")
-                return
+                # Step 3: Parse segments and sort by score
+                status_text.text("📊 Processing segments...")
+                progress_bar.progress(85)
                 
-            segments_sorted = sorted(segments, key=lambda x: x.get('score', 0), reverse=True)
-            
-            # Store segments for processing
-            st.session_state.segments_to_process = segments_sorted
-            st.session_state.current_processing_index = 0
-            st.session_state.processing_active = True
-            
-            progress_bar.progress(100)
-            status_text.text("✅ Starting clip generation...")
-            
-            st.success(f"🎉 Found {len(segments_sorted)} segments! Starting real-time generation of vertical clips...")
-            time.sleep(1)  # Brief pause before starting
-            st.rerun()
+                segments = parse_segments(ai_json, video_duration)
+                if not segments:
+                    st.warning("⚠️ No valid segments found in AI response.")
+                    return
+                    
+                segments_sorted = sorted(segments, key=lambda x: x.get('score', 0), reverse=True)
+                
+                # Store segments for processing
+                st.session_state.segments_to_process = segments_sorted
+                st.session_state.current_processing_index = 0
+                st.session_state.processing_active = True
+                
+                progress_bar.progress(100)
+                status_text.text("✅ Starting clip generation...")
+                
+                st.success(f"🎉 Found {len(segments_sorted)} segments! Starting real-time generation of vertical clips...")
+                time.sleep(1)  # Brief pause before starting
+                st.rerun()
+                
+            except Exception as e:
+                st.error(f"❌ Processing failed: {str(e)}")
+                st.info("💡 Try with a smaller video file or check your internet connection")
+                
+                # Show debug info for large files
+                if 'video_path' in st.session_state:
+                    try:
+                        video_size_mb = st.session_state.get('video_size', 0)
+                        if video_size_mb > 1000:
+                            st.info("🔧 For large files, try:")
+                            st.info("• Using a shorter video segment")
+                            st.info("• Enabling lower quality audio processing")
+                            st.info("• Reducing audio chunk size")
+                    except:
+                        pass
+                return
     else:
         st.info("🎯 Click 'Generate Vertical Clips' to start processing your video.")
 
