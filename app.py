@@ -82,8 +82,33 @@ def extract_audio_sample(video_path: str, duration: float = 600) -> tuple:
         
         st.info(f"📍 Sampling from {start_time/60:.1f} to {(start_time + sample_duration)/60:.1f} minutes")
         
-        # Extract just the sample clip
-        sample_clip = video.subclip(start_time, start_time + sample_duration)
+        # Extract just the sample clip - try different methods for compatibility
+        try:
+            # Method 1: Try subclip
+            sample_clip = video.subclip(start_time, start_time + sample_duration)
+        except AttributeError:
+            try:
+                # Method 2: Try subclipped
+                sample_clip = video.subclipped(start_time, start_time + sample_duration)
+            except AttributeError:
+                # Method 3: Try cutout method
+                try:
+                    if start_time > 0:
+                        sample_clip = video.cutout(0, start_time)
+                        if start_time + sample_duration < total_duration:
+                            sample_clip = sample_clip.cutout(sample_duration, sample_clip.duration)
+                    else:
+                        sample_clip = video.cutout(sample_duration, total_duration)
+                except AttributeError:
+                    # Method 4: Manual frame extraction fallback
+                    def get_sample_frame(get_frame, t):
+                        actual_t = start_time + t
+                        if actual_t >= start_time + sample_duration:
+                            actual_t = start_time + sample_duration - 0.1
+                        return get_frame(actual_t)
+                    
+                    sample_clip = video.fl(get_sample_frame, apply_to=['mask', 'audio'])
+                    sample_clip = sample_clip.set_duration(sample_duration)
         
         if sample_clip.audio is None:
             raise Exception("No audio track found in video")
@@ -320,7 +345,34 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
         st.info(f"🎬 Creating clip from {start_time/60:.1f} to {end_time/60:.1f} minutes...")
         
         video = VideoFileClip(video_path)
-        clip = video.subclip(start_time, end_time)
+        
+        # Extract the specific segment - try different methods for compatibility
+        try:
+            # Method 1: Try subclip
+            clip = video.subclip(start_time, end_time)
+        except AttributeError:
+            try:
+                # Method 2: Try subclipped
+                clip = video.subclipped(start_time, end_time)
+            except AttributeError:
+                # Method 3: Try cutout method
+                try:
+                    if start_time > 0:
+                        clip = video.cutout(0, start_time)
+                        if end_time < video.duration:
+                            clip = clip.cutout(end_time - start_time, clip.duration)
+                    else:
+                        clip = video.cutout(end_time, video.duration)
+                except AttributeError:
+                    # Method 4: Manual frame extraction fallback
+                    def get_clip_frame(get_frame, t):
+                        actual_t = start_time + t
+                        if actual_t >= end_time:
+                            actual_t = end_time - 0.1
+                        return get_frame(actual_t)
+                    
+                    clip = video.fl(get_clip_frame, apply_to=['mask', 'audio'])
+                    clip = clip.set_duration(end_time - start_time)
         
         # Get original dimensions
         w, h = clip.size
@@ -403,7 +455,23 @@ def create_vertical_clip(video_path: str, start_time: float, end_time: float, cr
         try:
             st.warning("Creating horizontal clip as fallback...")
             video = VideoFileClip(video_path)
-            clip = video.subclip(start_time, end_time)
+            
+            # Try different clip extraction methods for fallback too
+            try:
+                clip = video.subclip(start_time, end_time)
+            except AttributeError:
+                try:
+                    clip = video.subclipped(start_time, end_time)
+                except AttributeError:
+                    # Simple duration-based clip as last resort
+                    def get_fallback_frame(get_frame, t):
+                        actual_t = start_time + t
+                        if actual_t >= end_time:
+                            actual_t = end_time - 0.1
+                        return get_frame(actual_t)
+                    
+                    clip = video.fl(get_fallback_frame, apply_to=['mask', 'audio'])
+                    clip = clip.set_duration(end_time - start_time)
             
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
             clip.write_videofile(
