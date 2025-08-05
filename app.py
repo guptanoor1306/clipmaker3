@@ -66,14 +66,25 @@ def seconds_to_time(seconds: float) -> str:
 def extract_audio_sample(video_path: str, duration: float = 300) -> tuple:
     """Extract just a small sample of audio for transcription - using very conservative approach."""
     try:
+        # Validate video path first
+        if not video_path or not os.path.exists(video_path):
+            raise Exception(f"Video file not found: {video_path}")
+            
         # Start with smaller 5-minute sample for stability
         st.info(f"🎵 Extracting {duration/60:.1f} minute audio sample for analysis...")
+        
+        # Check file size safely
+        try:
+            file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            st.info(f"📁 Processing {file_size_mb:.1f}MB video file")
+        except Exception as e:
+            st.warning(f"Could not determine file size: {e}")
+            file_size_mb = 0
         
         video = VideoFileClip(video_path)
         total_duration = video.duration
         
         # Use even smaller sample for large files
-        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
         if file_size_mb > 1500:  # For very large files, use tiny sample
             duration = min(duration, 180)  # Max 3 minutes for huge files
             st.info(f"🔧 Using smaller {duration/60:.1f} minute sample for large file")
@@ -137,7 +148,8 @@ def extract_audio_sample(video_path: str, duration: float = 300) -> tuple:
     except Exception as e:
         # Clean up on error
         try:
-            video.close()
+            if 'video' in locals():
+                video.close()
         except:
             pass
         st.error(f"Audio sample extraction failed: {str(e)}")
